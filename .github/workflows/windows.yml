@@ -75,25 +75,42 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Item dist\windows\JaySnr-windows.exe | Format-List FullName, Length
 
-      - name: Install, run and keep the evidence
+      - name: Install, run, record and keep the evidence
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force $env:EVIDENCE | Out-Null
           Start-Process dist\windows\JaySnr-windows.exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/CURRENTUSER' -Wait
-          $exe = Join-Path $env:LOCALAPPDATA 'Programs\JaySnr\JaySnr.exe'
+          $installed = Join-Path $env:LOCALAPPDATA 'Programs\JaySnr'
+          $exe = Join-Path $installed 'JaySnr.exe'
           if (-not (Test-Path $exe)) { throw 'JaySnr.exe was not installed' }
-          $env:JAYSNR_STATUS_LOG = Join-Path $env:EVIDENCE 'status.log'
+          & (Join-Path $installed 'ffmpeg\ffmpeg.exe') -hide_banner -encoders 2>&1 | Select-String '264|aac' | Out-File (Join-Path $env:EVIDENCE 'encoders.txt')
+          # The status log and a 15-second test recording; both work only together, never in a normal launch.
+          $log = Join-Path $env:EVIDENCE 'status.log'
+          $env:JAYSNR_STATUS_LOG = $log
+          $env:JAYSNR_TEST_RECORD = '15'
           $app = Start-Process $exe -PassThru
-          Start-Sleep -Seconds 25
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          $shot = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-          [System.Drawing.Graphics]::FromImage($shot).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          $shot.Save((Join-Path $env:EVIDENCE 'studio.png'))
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $shot = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            [System.Drawing.Graphics]::FromImage($shot).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $shot.Save((Join-Path $env:EVIDENCE $name))
+          }
+          Start-Sleep -Seconds 14
+          Save-Screen 'studio-recording.png'
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Get-Date) -lt $deadline -and -not (Select-String -Path $log -Pattern 'recording-saved' -Quiet -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }
+          Save-Screen 'studio.png'
           $running = -not $app.HasExited
           Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
-          Get-Content $env:JAYSNR_STATUS_LOG -ErrorAction SilentlyContinue
+          Get-Content $log -ErrorAction SilentlyContinue
           if (-not $running) { throw 'JaySnr closed by itself' }
+          $saved = Get-ChildItem (Join-Path ([Environment]::GetFolderPath('MyVideos')) 'JaySnr') -Filter *.mp4 -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+          if (-not $saved) { throw 'No recording was saved' }
+          Copy-Item $saved.FullName (Join-Path $env:EVIDENCE 'recording.mp4')
+          & (Join-Path $installed 'ffmpeg\ffmpeg.exe') -hide_banner -i $saved.FullName 2>&1 | Select-String 'Duration|Stream' | Out-File (Join-Path $env:EVIDENCE 'recording.txt')
+          Get-Content (Join-Path $env:EVIDENCE 'recording.txt')
+          if ($saved.Length -lt 200000) { throw "The recording is too small ($($saved.Length) bytes)" }
 
       - uses: actions/upload-artifact@v4
         with:
