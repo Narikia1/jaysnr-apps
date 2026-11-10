@@ -128,10 +128,14 @@ jobs:
             [System.Drawing.Graphics]::FromImage($shot).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
             $shot.Save((Join-Path $env:EVIDENCE $name))
           }
+          # The app creates its status log only when it writes the first line, so look for the file before reading it.
           function Wait-Log($log, $pattern, $seconds) {
             $deadline = (Get-Date).AddSeconds($seconds)
-            while ((Get-Date) -lt $deadline -and -not (Select-String -Path $log -Pattern $pattern -Quiet -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }
-            return [bool](Select-String -Path $log -Pattern $pattern -Quiet -ErrorAction SilentlyContinue)
+            while ((Get-Date) -lt $deadline) {
+              if ((Test-Path $log) -and (Select-String -Path $log -Pattern $pattern -Quiet)) { return $true }
+              Start-Sleep -Seconds 1
+            }
+            return $false
           }
           # A long test recording, ended the way a crash or a power cut would: the encoder and the app killed mid-way.
           $log = Join-Path $env:EVIDENCE 'status-crash.log'
