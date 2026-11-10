@@ -111,6 +111,8 @@ jobs:
           & (Join-Path $installed 'ffmpeg\ffmpeg.exe') -hide_banner -i $saved.FullName 2>&1 | Select-String 'Duration|Stream' | Out-File (Join-Path $env:EVIDENCE 'recording.txt')
           Get-Content (Join-Path $env:EVIDENCE 'recording.txt')
           if ($saved.Length -lt 200000) { throw "The recording is too small ($($saved.Length) bytes)" }
+          # ffmpeg -i without an output ends with code 1; the checks above decide this step.
+          exit 0
 
       - uses: actions/upload-artifact@v4
         with:
