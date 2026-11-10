@@ -114,6 +114,62 @@ jobs:
           # ffmpeg -i without an output ends with code 1; the checks above decide this step.
           exit 0
 
+      - name: Cut a recording short, relaunch, and check it was recovered
+        shell: pwsh
+        run: |
+          $installed = Join-Path $env:LOCALAPPDATA 'Programs\JaySnr'
+          $exe = Join-Path $installed 'JaySnr.exe'
+          $ffmpeg = Join-Path $installed 'ffmpeg\ffmpeg.exe'
+          $folder = Join-Path ([Environment]::GetFolderPath('MyVideos')) 'JaySnr'
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $shot = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            [System.Drawing.Graphics]::FromImage($shot).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $shot.Save((Join-Path $env:EVIDENCE $name))
+          }
+          function Wait-Log($log, $pattern, $seconds) {
+            $deadline = (Get-Date).AddSeconds($seconds)
+            while ((Get-Date) -lt $deadline -and -not (Select-String -Path $log -Pattern $pattern -Quiet -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }
+            return [bool](Select-String -Path $log -Pattern $pattern -Quiet -ErrorAction SilentlyContinue)
+          }
+          # A long test recording, ended the way a crash or a power cut would: the encoder and the app killed mid-way.
+          $log = Join-Path $env:EVIDENCE 'status-crash.log'
+          $env:JAYSNR_STATUS_LOG = $log
+          $env:JAYSNR_TEST_RECORD = '300'
+          $app = Start-Process $exe -PassThru
+          if (-not (Wait-Log $log 'recording-started' 90)) { Get-Content $log -ErrorAction SilentlyContinue; throw 'The recording to cut short did not start' }
+          Start-Sleep -Seconds 12
+          Get-Process ffmpeg -ErrorAction SilentlyContinue | Stop-Process -Force
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          Get-Content $log
+          $cut = Get-ChildItem $folder -Filter *.mp4 | Sort-Object LastWriteTime | Select-Object -Last 1
+          if (-not $cut) { throw 'The cut-short recording is missing' }
+          "Cut short: $($cut.Name), $($cut.Length) bytes"
+          # The next launch tidies it into a normal MP4 and says how long it is; the same launch runs Check everything once.
+          $log = Join-Path $env:EVIDENCE 'status-recovery.log'
+          $env:JAYSNR_STATUS_LOG = $log
+          Remove-Item Env:JAYSNR_TEST_RECORD
+          $env:JAYSNR_TEST_PREFLIGHT = '1'
+          $app = Start-Process $exe -PassThru
+          $recovered = Wait-Log $log 'recording-recovered' 120
+          $checked = Wait-Log $log 'preflight-result' 90
+          Save-Screen 'check.png'
+          $running = -not $app.HasExited
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+          Get-Content $log
+          if (-not $running) { throw 'JaySnr closed by itself after the crash' }
+          if (-not $recovered) { throw 'The cut-short recording was not recovered' }
+          if (-not $checked) { 'Check everything did not finish in time (not a failure of this step)' }
+          $line = Select-String -Path $log -Pattern 'recording-recovered' | Select-Object -Last 1
+          if ($line.Line -notmatch '\((\d+\.\d) s\)' -or [double]$Matches[1] -le 0) { throw "The recovered length is missing: $($line.Line)" }
+          if (-not (Test-Path $cut.FullName)) { throw 'The recovered recording is missing' }
+          Copy-Item $cut.FullName (Join-Path $env:EVIDENCE 'recovered.mp4')
+          & $ffmpeg -hide_banner -i $cut.FullName 2>&1 | Select-String 'Duration|Stream' | Out-File (Join-Path $env:EVIDENCE 'recovered.txt')
+          Get-Content (Join-Path $env:EVIDENCE 'recovered.txt')
+          exit 0
+
       - uses: actions/upload-artifact@v4
         with:
           name: JaySnr-windows
