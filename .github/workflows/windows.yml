@@ -105,12 +105,45 @@ jobs:
           Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
           Get-Content $log -ErrorAction SilentlyContinue
           if (-not $running) { throw 'JaySnr closed by itself' }
-          $saved = Get-ChildItem (Join-Path ([Environment]::GetFolderPath('MyVideos')) 'JaySnr') -Filter *.mp4 -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+          # The recording itself, not a source's own file beside it (its name, an en dash, then the source).
+          $saved = Get-ChildItem (Join-Path ([Environment]::GetFolderPath('MyVideos')) 'JaySnr') -Filter *.mp4 -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch ' \u2013 ' } | Sort-Object LastWriteTime | Select-Object -Last 1
           if (-not $saved) { throw 'No recording was saved' }
           Copy-Item $saved.FullName (Join-Path $env:EVIDENCE 'recording.mp4')
           & (Join-Path $installed 'ffmpeg\ffmpeg.exe') -hide_banner -i $saved.FullName 2>&1 | Select-String 'Duration|Stream' | Out-File (Join-Path $env:EVIDENCE 'recording.txt')
           Get-Content (Join-Path $env:EVIDENCE 'recording.txt')
           if ($saved.Length -lt 200000) { throw "The recording is too small ($($saved.Length) bytes)" }
+          # ffmpeg -i without an output ends with code 1; the checks above decide this step.
+          exit 0
+
+      - name: Check the screen was also saved in a file of its own
+        shell: pwsh
+        run: |
+          $installed = Join-Path $env:LOCALAPPDATA 'Programs\JaySnr'
+          $ffmpeg = Join-Path $installed 'ffmpeg\ffmpeg.exe'
+          # The test recording's status log; the app writes each separate file's line before the recording's own.
+          $log = Join-Path $env:EVIDENCE 'status.log'
+          if (-not (Test-Path $log)) { throw 'The status log of the test recording is missing' }
+          $entries = Get-Content $log | ForEach-Object { $_ | ConvertFrom-Json }
+          $entries | Where-Object { $_.event -like 'layer-*' } | ForEach-Object { "$($_.event): $($_.detail)" }
+          $recording = $entries | Where-Object { $_.event -eq 'recording-saved' } | Select-Object -Last 1
+          if (-not $recording -or $recording.detail -notmatch '^(.+) \(\d+ bytes\)$') { throw 'The recording is not in the status log' }
+          $recording = Get-Item -LiteralPath $Matches[1]
+          $screen = $entries | Where-Object { $_.event -eq 'layer-saved' -and $_.detail -like 'screen: *' } | Select-Object -Last 1
+          if (-not $screen -or $screen.detail -notmatch '^screen: (.+) \(\d+ bytes\)$') { throw "The screen's own file was not saved" }
+          $screen = Get-Item -LiteralPath $Matches[1] -ErrorAction SilentlyContinue
+          if (-not $screen) { throw "The screen's own file is missing" }
+          $prefix = "$($recording.BaseName) $([char]0x2013) "
+          if ($screen.DirectoryName -ne $recording.DirectoryName -or -not $screen.BaseName.StartsWith($prefix, [StringComparison]::Ordinal)) { throw "The screen's own file is not next to the recording: $($screen.FullName)" }
+          "Screen: $($screen.Name), $($screen.Length) bytes"
+          Copy-Item -LiteralPath $screen.FullName (Join-Path $env:EVIDENCE 'screen.mp4')
+          & $ffmpeg -hide_banner -i $screen.FullName 2>&1 | Select-String 'Duration|Stream' | Out-File (Join-Path $env:EVIDENCE 'screen.txt')
+          $described = (Get-Content (Join-Path $env:EVIDENCE 'screen.txt')) -join "`n"
+          $described
+          if ($described -notmatch 'Stream .*Video: h264') { throw "The screen's own file has no picture" }
+          if ($described -notmatch 'Duration: (\d+):(\d+):(\d+(?:\.\d+)?)' -or ([int]$Matches[1] * 3600 + [int]$Matches[2] * 60 + [double]$Matches[3]) -lt 5) { throw "The screen's own file is too short" }
+          # This machine has no camera, so no camera file is expected; it is only noted.
+          $camera = $entries | Where-Object { $_.event -eq 'layer-saved' -and $_.detail -like 'camera: *' } | Select-Object -Last 1
+          if ($camera) { "Camera: $($camera.detail)" } else { 'Camera: no file (none expected without a camera)' }
           # ffmpeg -i without an output ends with code 1; the checks above decide this step.
           exit 0
 
@@ -148,7 +181,7 @@ jobs:
           Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
           Get-Content $log
-          $cut = Get-ChildItem $folder -Filter *.mp4 | Sort-Object LastWriteTime | Select-Object -Last 1
+          $cut = Get-ChildItem $folder -Filter *.mp4 | Where-Object { $_.Name -notmatch ' \u2013 ' } | Sort-Object LastWriteTime | Select-Object -Last 1
           if (-not $cut) { throw 'The cut-short recording is missing' }
           "Cut short: $($cut.Name), $($cut.Length) bytes"
           # The next launch tidies it into a normal MP4 and says how long it is; the same launch runs Check everything once.
